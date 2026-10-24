@@ -10,6 +10,9 @@ export default function App() {
   const [joinCode, setJoinCode] = useState("");
   const [joined, setJoined] = useState(false);
   const [playerReady, setPlayerReady] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+const [searchResults, setSearchResults] = useState([]);
+const [searching, setSearching] = useState(false);
 
   const playerInstanceRef = useRef(null);
   const roomCodeRef = useRef("");
@@ -336,6 +339,100 @@ async function joinRoom(event) {
     }
   }
 
+async function searchYouTube(event) {
+  event.preventDefault();
+
+  const query = searchQuery.trim();
+  if (!query) return;
+
+  setSearching(true);
+  setSearchResults([]);
+
+  try {
+    const key = import.meta.env.VITE_YOUTUBE_API_KEY;
+    console.log(
+  "¿Se cargó la clave de YouTube?",
+  Boolean(import.meta.env.VITE_YOUTUBE_API_KEY)
+);
+
+    if (!key) {
+      alert("Falta configurar la clave de YouTube en .env.local.");
+      return;
+    }
+
+    const params = new URLSearchParams({
+      part: "snippet",
+      type: "video",
+      maxResults: "8",
+      q: query,
+      key,
+    });
+
+    const response = await fetch(
+      `https://www.googleapis.com/youtube/v3/search?${params.toString()}`
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("Error de YouTube:", data);
+      alert(data.error?.message || "No se pudo buscar en YouTube.");
+      return;
+    }
+
+    setSearchResults(
+      (data.items || []).map((item) => ({
+        id: item.id.videoId,
+        title: item.snippet.title,
+        channel: item.snippet.channelTitle,
+        thumbnail:
+          item.snippet.thumbnails?.medium?.url ||
+          item.snippet.thumbnails?.default?.url,
+      }))
+    );
+
+    if (!data.items?.length) {
+      alert("No encontramos videos con esa búsqueda.");
+    }
+  } catch (error) {
+    console.error(error);
+    alert("Error al buscar videos. Revisa tu conexión.");
+  } finally {
+    setSearching(false);
+  }
+}
+
+
+
+async function selectSearchResult(id) {
+  if (!roomCode) {
+    alert("Primero crea una sala o únete a una.");
+    return;
+  }
+
+  const { error } = await supabase
+    .from("rooms")
+    .update({
+      video_id: id,
+      is_playing: false,
+      playback_position: 0,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("room_code", roomCode);
+
+  if (error) {
+    console.error(error);
+    alert("No se pudo sincronizar el video.");
+    return;
+  }
+
+  setVideoUrl("");
+  setPlayerReady(false);
+  setVideoId(id);
+}
+
+
+
   return (
     <main className="app">
       <nav className="navbar">
@@ -407,9 +504,46 @@ async function joinRoom(event) {
           <div>
             <span className="eyebrow">NOCHE DE PELÍCULA</span>
             <h2>Nuestra pantalla</h2>
+            
           </div>
           <span className="private">♡ Un espacio para compartir</span>
         </div>
+
+<div className="youtube-search">
+  <form className="video-form" onSubmit={searchYouTube}>
+    <input
+      type="search"
+      placeholder="Busca canciones, videos..."
+      value={searchQuery}
+      onChange={(event) => setSearchQuery(event.target.value)}
+      required
+    />
+
+    <button className="primary" type="submit" disabled={searching}>
+      {searching ? "Buscando..." : "Buscar en YouTube ↗"}
+    </button>
+  </form>
+
+  {searchResults.length > 0 && (
+    <div className="search-results">
+      {searchResults.map((video) => (
+        <button
+          className="search-result"
+          key={video.id}
+          type="button"
+          onClick={() => selectSearchResult(video.id)}
+        >
+          <img src={video.thumbnail} alt="" />
+
+          <span>
+            <strong>{video.title}</strong>
+            <small>{video.channel}</small>
+          </span>
+        </button>
+      ))}
+    </div>
+  )}
+</div>
 
         <div className="player">
           {videoId ? (
@@ -448,7 +582,7 @@ async function joinRoom(event) {
           NuestraSala
         </a>
         <span>Hecho con cariño, para compartir momentos. ♡</span>
-      </footer>
+          </footer>
     </main>
   );
 }
