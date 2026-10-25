@@ -14,6 +14,13 @@ export default function App() {
 const [searchResults, setSearchResults] = useState([]);
 const [searching, setSearching] = useState(false);
 
+  const [chatOpen, setChatOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [messageText, setMessageText] = useState("");
+  const [senderName, setSenderName] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
+
+
   const playerInstanceRef = useRef(null);
   const roomCodeRef = useRef("");
   const applyingRemoteRef = useRef(false);
@@ -93,7 +100,72 @@ player.seekTo(position, true);
       supabase.removeChannel(channel);
     };
   }, [roomCode, playerReady]);
+  // Chat en tiempo real de NuestraSala
+  useEffect(() => {
+    if (!roomCode) {
+      setMessages([]);
+      return;
+    }
 
+    let active = true;
+    setMessages([]);
+
+    async function loadMessages() {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("id, room_code, sender_name, message, created_at")
+        .eq("room_code", roomCode)
+        .order("created_at", { ascending: true })
+        .limit(100);
+
+      if (error) {
+        console.error("Error cargando mensajes:", error);
+        return;
+      }
+
+      if (active) {
+        setMessages(data || []);
+      }
+    }
+
+    const channel = supabase
+      .channel(`messages-${roomCode}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `room_code=eq.${roomCode}`,
+        },
+        (payload) => {
+          if (!active) return;
+
+          setMessages((current) => {
+            if (current.some((item) => item.id === payload.new.id)) {
+              return current;
+            }
+
+            return [...current, payload.new]
+              .sort(
+                (a, b) =>
+                  new Date(a.created_at) - new Date(b.created_at)
+              )
+              .slice(-100);
+          });
+        }
+      )
+      .subscribe((status) => {
+        console.log("Estado del chat:", status);
+      });
+
+    loadMessages();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
+  }, [roomCode]);
   // Inicializar el reproductor de YouTube
   useEffect(() => {
     if (!videoId) return;
@@ -339,6 +411,45 @@ async function joinRoom(event) {
     }
   }
 
+  async function sendMessage(event) {
+    event.preventDefault();
+
+    const name = senderName.trim();
+    const message = messageText.trim();
+
+    if (!roomCode || !name || !message) return;
+
+    if (name.length > 40 || message.length > 1000) {
+      alert("El nombre admite hasta 40 caracteres y el mensaje hasta 1000.");
+      return;
+    }
+
+    setSendingMessage(true);
+
+    try {
+      const { error } = await supabase
+        .from("messages")
+        .insert({
+          room_code: roomCode,
+          sender_name: name,
+          message: message,
+        });
+
+      if (error) {
+        console.error("Error enviando mensaje:", error);
+        alert("No se pudo enviar el mensaje. Inténtalo otra vez.");
+        return;
+      }
+
+      setMessageText("");
+    } catch (error) {
+      console.error("Error enviando mensaje:", error);
+      alert("Ocurrió un error al enviar el mensaje.");
+    } finally {
+      setSendingMessage(false);
+    }
+  }
+
 async function searchYouTube(event) {
   event.preventDefault();
 
@@ -574,6 +685,94 @@ async function selectSearchResult(id) {
           Cuando alguien comparte un video, el video seleccionado se actualiza
           en los dispositivos conectados a la misma sala.
         </p>
+        
+{roomCode && (
+  <div className="chat-launcher">
+    <button
+      className="primary"
+      type="button"
+      onClick={() => setChatOpen((open) => !open)}
+    >
+      {chatOpen
+        ? "Cerrar chat ×"
+        : `Abrir chat 💬${messages.length ? ` (${messages.length})` : ""}`}
+    </button>
+  </div>
+)}
+
+{chatOpen && roomCode && (
+  <section className="chat-panel" aria-label="Chat de la sala">
+    <div className="chat-header">
+      <div>
+        <h3>Chat de NuestraSala ❤️</h3>
+        <p>Sala {roomCode}</p>
+      </div>
+
+      <button
+        type="button"
+        className="chat-close"
+        onClick={() => setChatOpen(false)}
+        aria-label="Cerrar chat"
+      >
+        ×
+      </button>
+    </div>
+
+    <div className="chat-messages" aria-live="polite">
+      {messages.length === 0 ? (
+        <p className="chat-empty">
+          ¡Saluda a tu pareja! ❤️
+        </p>
+      ) : (
+        messages.map((msg) => (
+          <article className="chat-message" key={msg.id}>
+            <div className="chat-message-meta">
+              <strong>{msg.sender_name}</strong>
+              <time dateTime={msg.created_at}>
+                {new Date(msg.created_at).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </time>
+            </div>
+            <p>{msg.message}</p>
+          </article>
+        ))
+      )}
+    </div>
+
+    <form className="chat-form" onSubmit={sendMessage}>
+      <input
+        value={senderName}
+        onChange={(event) => setSenderName(event.target.value)}
+        placeholder="Tu nombre"
+        maxLength={40}
+        required
+      />
+
+      <input
+        value={messageText}
+        onChange={(event) => setMessageText(event.target.value)}
+        placeholder="Escribe un mensaje..."
+        maxLength={1000}
+        required
+      />
+
+      <button
+        className="primary"
+        type="submit"
+        disabled={
+          sendingMessage ||
+          !messageText.trim() ||
+          !senderName.trim()
+        }
+      >
+        {sendingMessage ? "Enviando..." : "Enviar ↗"}
+      </button>
+    </form>
+  </section>
+)}
+
       </section>
 
       <footer>
