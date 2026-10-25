@@ -2,8 +2,42 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import { supabase } from "./lib/supabase";
+import Auth from "./Auth";
 
 export default function App() {
+    const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadSession() {
+      const { data, error } = await supabase.auth.getSession();
+
+      if (!active) return;
+
+      if (error) {
+        console.error("Error obteniendo la sesión:", error);
+      }
+
+      setSession(data?.session ?? null);
+      setAuthLoading(false);
+    }
+
+    loadSession();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      setAuthLoading(false);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
   const [videoUrl, setVideoUrl] = useState("");
   const [videoId, setVideoId] = useState("");
   const [roomCode, setRoomCode] = useState("");
@@ -292,22 +326,43 @@ onError: (event) => {
     };
   }, [videoId]);
 
+ 
   // Crear sala
   async function createRoom() {
-    const code = Math.random()
-      .toString(36)
-      .slice(2, 8)
-      .toUpperCase();
+    const user = session?.user;
 
-    const { error } = await supabase.from("rooms").insert({
+    if (!user) {
+      alert("Debes iniciar sesión para crear una sala.");
+      return;
+    }
+
+    const code = crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
+
+    const { error: roomError } = await supabase.from("rooms").insert({
       room_code: code,
+      created_by: user.id,
       is_playing: false,
       playback_position: 0,
     });
 
-    if (error) {
-      console.error(error);
-      alert("No se pudo crear la sala.");
+    if (roomError) {
+      console.error("Error creando sala:", roomError);
+      alert("No se pudo crear la sala. Revisa la consola.");
+      return;
+    }
+
+    const { error: memberError } = await supabase
+      .from("room_members")
+      .insert({
+        room_code: code,
+        user_id: user.id,
+      });
+
+    if (memberError) {
+      console.error("Error registrando miembro:", memberError);
+      alert(
+        "La sala se creó, pero no se pudo registrar tu acceso. No compartas el código todavía."
+      );
       return;
     }
 
@@ -318,43 +373,47 @@ onError: (event) => {
     setPlayerReady(false);
   }
 
-  // Unirse a una sala
+
+  
  
-async function joinRoom(event) {
-  event.preventDefault();
+  // Unirse a una sala
+  async function joinRoom(event) {
+    event.preventDefault();
 
-  const code = joinCode.trim().toUpperCase();
+    const code = joinCode.trim().toUpperCase();
 
-  if (!code) return;
+    if (!code) return;
 
-  const { data, error } = await supabase
-    .from("rooms")
-    .select("room_code, video_id, playback_position, is_playing")
-    .eq("room_code", code)
-    .maybeSingle();
+    const { data, error } = await supabase.rpc("join_room", {
+      p_room_code: code,
+    });
 
-  if (error) {
-    console.error(error);
-    alert("No se pudo buscar la sala.");
-    return;
+    if (error) {
+      console.error("Error buscando o uniéndose a la sala:", error);
+      alert("No se pudo unir a la sala. Revisa la consola.");
+      return;
+    }
+
+    const room = Array.isArray(data) ? data[0] : data;
+
+    if (!room) {
+      alert("No existe una sala con ese código.");
+      return;
+    }
+
+    setRoomCode(room.room_code);
+    setVideoId(room.video_id || "");
+
+    pendingPositionRef.current =
+      Number(room.playback_position) || 0;
+    pendingPlayingRef.current = Boolean(room.is_playing);
+    pendingInitialSyncRef.current = true;
+
+    setJoined(true);
+    setPlayerReady(false);
   }
 
-  if (!data) {
-    alert("No existe una sala con ese código.");
-    return;
-  }
 
-  setRoomCode(data.room_code);
-  setVideoId(data.video_id || "");
-
-  // Guardar el estado inicial para sincronizar el reproductor
-  pendingPositionRef.current = Number(data.playback_position) || 0;
-  pendingPlayingRef.current = Boolean(data.is_playing);
-  pendingInitialSyncRef.current = true;
-
-  setJoined(true);
-  setPlayerReady(false);
-}
 
   // Compartir video de YouTube
   async function loadVideo(event) {
@@ -543,7 +602,19 @@ async function selectSearchResult(id) {
 }
 
 
+  if (authLoading) {
+    return (
+      <main className="app">
+        <p style={{ textAlign: "center", padding: "60px 20px" }}>
+          Cargando NuestraSala... ❤️
+        </p>
+      </main>
+    );
+  }
 
+  if (!session) {
+    return <Auth />;
+  }
   return (
     <main className="app">
       <nav className="navbar">
@@ -594,7 +665,7 @@ async function selectSearchResult(id) {
               onChange={(event) =>
                 setJoinCode(event.target.value.toUpperCase())
               }
-              maxLength={6}
+              maxLength={12}
               required
             />
             <button className="primary" type="submit">
