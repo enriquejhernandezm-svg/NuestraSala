@@ -56,7 +56,21 @@ const [searching, setSearching] = useState(false);
   session?.user?.email?.split("@")[0] ||
   "Usuario";
   const [sendingMessage, setSendingMessage] = useState(false);
+// Audio en tiempo real de NuestraSala
+const [voiceEnabled, setVoiceEnabled] = useState(false);
+const [voiceStatus, setVoiceStatus] = useState("Desactivado");
 
+const localStreamRef = useRef(null);
+const remoteAudioRef = useRef(null);
+const peerConnectionRef = useRef(null);
+const voiceChannelRef = useRef(null);
+const voiceEnabledRef = useRef(false);
+const makingOfferRef = useRef(false);
+const pendingCandidatesRef = useRef([]);
+const remoteDescriptionSetRef = useRef(false);
+const previousYoutubeVolumeRef = useRef(null);
+const remoteUserIdRef = useRef(null);
+const voiceStartingRef = useRef(false);
 
   const playerInstanceRef = useRef(null);
   const roomCodeRef = useRef("");
@@ -79,6 +93,340 @@ const pendingInitialSyncRef = useRef(false);
 };
 
   roomCodeRef.current = roomCode;
+
+  // Conexión de voz entre los miembros de NuestraSala
+  useEffect(() => {
+    if (!voiceEnabled) {
+      setVoiceStatus("Desactivado");
+      return;
+    }
+
+    if (!roomCode || !session?.user?.id) {
+      setVoiceStatus("Primero entra a una sala.");
+      setVoiceEnabled(false);
+      return;
+    }
+
+    let disposed = false;
+    let channel = null;
+    let localStream = null;
+    let peer = null;
+
+    const userId = session.user.id;
+
+    const sendSignal = async (to, signal) => {
+      if (!channel || disposed) return;
+
+      const { error } = await channel.send({
+        type: "broadcast",
+        event: "signal",
+        payload: { from: userId, to, ...signal },
+      });
+
+      if (error) {
+        console.error("Error enviando señal de voz:", error);
+      }
+    };
+
+    const flushCandidates = async () => {
+      const connection = peerConnectionRef.current;
+
+      if (!connection?.remoteDescription) return;
+
+      while (pendingCandidatesRef.current.length) {
+        const candidate = pendingCandidatesRef.current.shift();
+
+        try {
+          await connection.addIceCandidate(candidate);
+        } catch (error) {
+          console.error("Error agregando candidato ICE:", error);
+        }
+      }
+    };
+
+    const createPeer = (remoteId) => {
+      if (peerConnectionRef.current) {
+        return peerConnectionRef.current;
+      }
+
+      remoteUserIdRef.current = remoteId;
+
+      const connection = new RTCPeerConnection({
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+        ],
+      });
+
+      peerConnectionRef.current = connection;
+      peer = connection;
+
+      localStream.getTracks().forEach((track) => {
+        connection.addTrack(track, localStream);
+      });
+
+      connection.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendSignal(remoteId, {
+            candidate: event.candidate.toJSON(),
+          });
+        }
+      };
+
+      connection.ontrack = (event) => {
+        const audio = remoteAudioRef.current;
+
+        if (!audio) return;
+
+        audio.srcObject = event.streams[0];
+        audio.volume = 1;
+
+        audio.play().catch(() => {
+          setVoiceStatus(
+            "Pulsa el botón de voz para permitir el audio."
+          );
+        });
+      };
+
+      connection.onconnectionstatechange = () => {
+        if (disposed) return;
+
+        const state = connection.connectionState;
+
+        if (state === "connected") {
+          setVoiceStatus("Voz conectada ❤️");
+        } else if (state === "connecting") {
+          setVoiceStatus("Conectando la voz...");
+        } else if (
+          state === "failed" ||
+          state === "disconnected"
+        ) {
+          setVoiceStatus(
+            "Conexión interrumpida. Intenta desactivar y activar el micrófono."
+          );
+        }
+      };
+
+      return connection;
+    };
+
+    const handleSignal = async ({ payload }) => {
+      if (
+        disposed ||
+        !payload ||
+        payload.to !== userId ||
+        !payload.from
+      ) {
+        return;
+      }
+
+      try {
+        const connection = createPeer(payload.from);
+
+        if (payload.description) {
+          await connection.setRemoteDescription(
+            payload.description
+          );
+
+          remoteDescriptionSetRef.current = true;
+
+          await flushCandidates();
+
+          if (payload.description.type === "offer") {
+            const answer = await connection.createAnswer();
+
+            await connection.setLocalDescription(answer);
+
+            await sendSignal(payload.from, {
+              description: connection.localDescription,
+            });
+          }
+        }
+
+        if (payload.candidate) {
+          const candidate = new RTCIceCandidate(
+            payload.candidate
+          );
+
+          if (connection.remoteDescription) {
+            await connection.addIceCandidate(candidate);
+          } else {
+            pendingCandidatesRef.current.push(candidate);
+          }
+        }
+      } catch (error) {
+        console.error("Error procesando señal de voz:", error);
+      }
+    };
+
+    const startVoice = async () => {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error(
+            "El navegador no permite acceder al micrófono."
+          );
+        }
+
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        });
+
+        if (disposed) {
+          localStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        localStreamRef.current = localStream;
+
+        setVoiceStatus("Micrófono activo; conectando...");
+
+        channel = supabase.channel(`voice-${roomCode}`, {
+          config: {
+            private: true,
+            presence: { key: userId },
+          },
+        });
+
+        voiceChannelRef.current = channel;
+
+        channel
+          .on("broadcast", { event: "signal" }, handleSignal)
+          .on("presence", { event: "sync" }, async () => {
+            if (disposed) return;
+
+            const members = Object.values(
+              channel.presenceState()
+            ).flat();
+
+            const otherMembers = members.filter(
+              (member) => member.user_id !== userId
+            );
+
+            if (otherMembers.length === 0) {
+              setVoiceStatus("Micrófono activo; esperando a tu pareja...");
+              return;
+            }
+
+            const remoteId = otherMembers[0].user_id;
+
+            remoteUserIdRef.current = remoteId;
+
+            // Solo un dispositivo inicia la oferta.
+            if (userId.localeCompare(remoteId) < 0) {
+              try {
+                const connection = createPeer(remoteId);
+
+                if (connection.signalingState !== "stable") {
+                  return;
+                }
+
+                makingOfferRef.current = true;
+
+                const offer = await connection.createOffer();
+
+                await connection.setLocalDescription(offer);
+
+                await sendSignal(remoteId, {
+                  description: connection.localDescription,
+                });
+              } catch (error) {
+                console.error("Error creando oferta de voz:", error);
+              } finally {
+                makingOfferRef.current = false;
+              }
+            }
+          });
+
+        channel.subscribe(async (status) => {
+          if (disposed) return;
+
+          if (status === "SUBSCRIBED") {
+            try {
+              await channel.track({ user_id: userId });
+              setVoiceStatus(
+                "Micrófono activo; esperando a tu pareja..."
+              );
+            } catch (error) {
+              console.error("Error registrando presencia:", error);
+              setVoiceStatus("No se pudo entrar al canal de voz.");
+            }
+          } else if (
+            status === "CHANNEL_ERROR" ||
+            status === "TIMED_OUT"
+          ) {
+            setVoiceStatus(
+              "No se pudo conectar al canal privado de voz."
+            );
+            console.error("Estado del canal de voz:", status);
+          }
+        });
+      } catch (error) {
+        console.error("Error activando el micrófono:", error);
+
+        setVoiceStatus(
+          error.name === "NotAllowedError"
+            ? "Debes permitir el acceso al micrófono."
+            : error.message || "No se pudo activar el micrófono."
+        );
+
+        setVoiceEnabled(false);
+      }
+    };
+
+    startVoice();
+
+    return () => {
+      disposed = true;
+
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+
+      if (peer) {
+        peer.close();
+      }
+
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+      }
+
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.pause();
+        remoteAudioRef.current.srcObject = null;
+      }
+
+      localStreamRef.current = null;
+      peerConnectionRef.current = null;
+      voiceChannelRef.current = null;
+      remoteUserIdRef.current = null;
+      pendingCandidatesRef.current = [];
+      remoteDescriptionSetRef.current = false;
+      makingOfferRef.current = false;
+    };
+  }, [voiceEnabled, roomCode, session?.user?.id]);
+
+  // Ajustar el volumen de YouTube mientras usamos la voz
+  useEffect(() => {
+    const player = playerInstanceRef.current;
+
+    if (!player || !playerReady) return;
+
+    if (voiceEnabled) {
+      if (previousYoutubeVolumeRef.current === null) {
+        previousYoutubeVolumeRef.current = player.getVolume();
+      }
+
+      player.setVolume(55);
+    } else if (previousYoutubeVolumeRef.current !== null) {
+      player.setVolume(previousYoutubeVolumeRef.current);
+      previousYoutubeVolumeRef.current = null;
+    }
+  }, [voiceEnabled, playerReady, videoId]);
 
   // Escuchar cambios en la sala
   useEffect(() => {
@@ -237,6 +585,7 @@ onReady: (event) => {
   if (cancelled) return;
 
   setPlayerReady(true);
+  
   console.log("Reproductor de YouTube listo.");
 
   console.log("Video cargado:", event.target.getVideoUrl());
@@ -758,6 +1107,23 @@ return (
       ))}
     </div>
   )}
+</div>
+<audio
+  ref={remoteAudioRef}
+  autoPlay
+  playsInline
+  controls={false}
+/>
+
+<div className="voice-controls">
+  <button
+    type="button"
+    onClick={() => setVoiceEnabled((previous) => !previous)}
+  >
+    {voiceEnabled ? "Desconectar voz 🔴" : "Activar micrófono 🎙️"}
+  </button>
+
+  <p role="status">{voiceStatus}</p>
 </div>
 
         <div className="player">
