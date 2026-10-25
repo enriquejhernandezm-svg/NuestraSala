@@ -51,7 +51,10 @@ const [searching, setSearching] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [messageText, setMessageText] = useState("");
-  const [senderName, setSenderName] = useState("");
+ const senderName =
+  session?.user?.user_metadata?.username ||
+  session?.user?.email?.split("@")[0] ||
+  "Usuario";
   const [sendingMessage, setSendingMessage] = useState(false);
 
 
@@ -470,72 +473,72 @@ onError: (event) => {
     }
   }
 
-  async function sendMessage(event) {
-    event.preventDefault();
+ 
+async function sendMessage(event) {
+  event.preventDefault();
 
-    const name = senderName.trim();
-    const message = messageText.trim();
+  const name = senderName.trim();
+  const message = messageText.trim();
+  const userId = session?.user?.id;
 
-    if (!roomCode || !name || !message) return;
+  if (!roomCode || !userId || !name || !message) return;
 
-    if (name.length > 40 || message.length > 1000) {
-      alert("El nombre admite hasta 40 caracteres y el mensaje hasta 1000.");
+  if (name.length > 40 || message.length > 1000) {
+    alert("El nombre admite hasta 40 caracteres y el mensaje hasta 1000.");
+    return;
+  }
+
+  setSendingMessage(true);
+
+  try {
+    const { error } = await supabase
+      .from("messages")
+      .insert({
+        room_code: roomCode,
+        user_id: userId,
+        sender_name: name,
+        message: message,
+      });
+
+    if (error) {
+      console.error("Error enviando mensaje:", error);
+      alert("No se pudo enviar el mensaje. Inténtalo otra vez.");
       return;
     }
 
-    setSendingMessage(true);
-
-    try {
-      const { error } = await supabase
-        .from("messages")
-        .insert({
-          room_code: roomCode,
-          sender_name: name,
-          message: message,
-        });
-
-      if (error) {
-        console.error("Error enviando mensaje:", error);
-        alert("No se pudo enviar el mensaje. Inténtalo otra vez.");
-        return;
-      }
-
-      setMessageText("");
-    } catch (error) {
-      console.error("Error enviando mensaje:", error);
-      alert("Ocurrió un error al enviar el mensaje.");
-    } finally {
-      setSendingMessage(false);
-    }
+    setMessageText("");
+  } catch (error) {
+    console.error("Error enviando mensaje:", error);
+    alert("Ocurrió un error al enviar el mensaje.");
+  } finally {
+    setSendingMessage(false);
   }
+}
 
 async function searchYouTube(event) {
   event.preventDefault();
 
   const query = searchQuery.trim();
+
   if (!query) return;
+
+  const apiKey = import.meta.env.VITE_YOUTUBE_API_KEY;
+
+  if (!apiKey) {
+    alert("No se encontró la clave API de YouTube.");
+    return;
+  }
 
   setSearching(true);
   setSearchResults([]);
 
   try {
-    const key = import.meta.env.VITE_YOUTUBE_API_KEY;
-    console.log(
-  "¿Se cargó la clave de YouTube?",
-  Boolean(import.meta.env.VITE_YOUTUBE_API_KEY)
-);
-
-    if (!key) {
-      alert("Falta configurar la clave de YouTube en .env.local.");
-      return;
-    }
-
     const params = new URLSearchParams({
       part: "snippet",
-      type: "video",
-      maxResults: "8",
       q: query,
-      key,
+      type: "video",
+      maxResults: "10",
+      key: apiKey,
     });
 
     const response = await fetch(
@@ -545,32 +548,37 @@ async function searchYouTube(event) {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error("Error de YouTube:", data);
-      alert(data.error?.message || "No se pudo buscar en YouTube.");
+      console.error("Error buscando en YouTube:", data);
+      alert(
+        data.error?.message ||
+          "No se pudieron buscar videos en YouTube."
+      );
       return;
     }
 
-    setSearchResults(
-      (data.items || []).map((item) => ({
-        id: item.id.videoId,
-        title: item.snippet.title,
-        channel: item.snippet.channelTitle,
-        thumbnail:
-          item.snippet.thumbnails?.medium?.url ||
-          item.snippet.thumbnails?.default?.url,
-      }))
-    );
+    const results = (data.items || []).map((item) => ({
+      id: item.id.videoId,
+      title: item.snippet.title,
+      channel: item.snippet.channelTitle,
+      thumbnail:
+        item.snippet.thumbnails?.medium?.url ||
+        item.snippet.thumbnails?.default?.url ||
+        "",
+    }));
 
-    if (!data.items?.length) {
+    setSearchResults(results);
+
+    if (results.length === 0) {
       alert("No encontramos videos con esa búsqueda.");
     }
   } catch (error) {
-    console.error(error);
-    alert("Error al buscar videos. Revisa tu conexión.");
+    console.error("Error buscando videos:", error);
+    alert("No se pudo conectar con YouTube. Inténtalo de nuevo.");
   } finally {
     setSearching(false);
   }
 }
+
 
 
 
@@ -615,17 +623,42 @@ async function selectSearchResult(id) {
   if (!session) {
     return <Auth />;
   }
-  return (
-    <main className="app">
-      <nav className="navbar">
-        <a className="brand" href="#inicio">
-          <span className="heart">♥</span>
-          NuestraSala
-        </a>
+ 
+return (
+  <main className="app">
+    <nav className="navbar">
+      <a className="brand" href="#inicio">
+        <span className="heart">♥</span>
+        NuestraSala
+      </a>
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "16px",
+        }}
+      >
         <span className="online">
           <span className="dot" /> Tu espacio juntos
         </span>
-      </nav>
+
+        <button
+          type="button"
+          className="primary"
+          onClick={async () => {
+            const { error } = await supabase.auth.signOut();
+
+            if (error) {
+              alert("No se pudo cerrar sesión: " + error.message);
+            }
+          }}
+        >
+          Cerrar sesión
+        </button>
+      </div>
+    </nav>
+
 
       <section className="hero" id="inicio">
         <div className="eyebrow">♡ UN LUGAR PARA LOS DOS ♡</div>
@@ -813,13 +846,11 @@ async function selectSearchResult(id) {
     </div>
 
     <form className="chat-form" onSubmit={sendMessage}>
-      <input
-        value={senderName}
-        onChange={(event) => setSenderName(event.target.value)}
-        placeholder="Tu nombre"
-        maxLength={40}
-        required
-      />
+      
+<p className="chat-user">
+  Chateando como <strong>{senderName}</strong>
+</p>
+
 
       <input
         value={messageText}
